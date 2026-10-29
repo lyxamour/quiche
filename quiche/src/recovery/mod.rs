@@ -868,6 +868,17 @@ mod tests {
         assert_eq!(params.startup_cwnd_gain, None);
     }
 
+    #[test]
+    fn bbr_lower_bounds_loss_threshold_reaches_the_recovery_config() {
+        let mut config = Config::new(crate::PROTOCOL_VERSION).unwrap();
+        config.set_bbr_lower_bounds_loss_threshold(0.6);
+        let params = RecoveryConfig::from_config(&config)
+            .custom_bbr_params
+            .unwrap();
+        assert_eq!(params.lower_bounds_loss_threshold, Some(0.6));
+        assert_eq!(params.loss_threshold, None);
+    }
+
     fn recovery_for_alg(algo: CongestionControlAlgorithm) -> Recovery {
         let mut cfg = Config::new(crate::PROTOCOL_VERSION).unwrap();
         cfg.set_cc_algorithm(algo);

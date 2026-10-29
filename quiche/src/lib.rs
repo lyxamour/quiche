@@ -1121,6 +1121,20 @@ impl Config {
             .loss_threshold = Some(threshold);
     }
 
+    /// Sets the per-round loss rate above which BBRv2 lowers its lower
+    /// bounds on bandwidth and inflight outside of probing (default 0: any
+    /// loss lowers them).
+    ///
+    /// Only applies to `CongestionControlAlgorithm::Bbr2Gcongestion`. Random
+    /// loss that is not congestion otherwise keeps shrinking the congestion
+    /// window every round trip; BBR in quic-go ignores loss and holds the
+    /// link rate.
+    pub fn set_bbr_lower_bounds_loss_threshold(&mut self, threshold: f32) {
+        self.custom_bbr_params
+            .get_or_insert_with(Default::default)
+            .lower_bounds_loss_threshold = Some(threshold);
+    }
+
     /// Sets the congestion control algorithm used by string.
     ///
     /// The default value is `cubic`. On error `Error::CongestionControl`
