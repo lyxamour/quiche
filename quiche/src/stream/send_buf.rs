@@ -122,6 +122,10 @@ where
     /// The final stream offset written to the stream, if any.
     fin_off: Option<u64>,
 
+    /// Whether a STREAM frame carrying the final size has been emitted and
+    /// not reported lost since.
+    fin_sent: bool,
+
     /// Whether the stream's send-side has been shut down.
     shutdown: bool,
 
@@ -297,11 +301,29 @@ impl<F: BufFactory> SendBuf<F> {
         // propagate the final size.
         let fin = self.fin_off == Some(next_off);
 
+        if fin {
+            self.fin_sent = true;
+        }
+
         // Record the largest offset that has been sent so we can accurately
         // report final_size
         self.emit_off = cmp::max(self.emit_off, next_off);
 
         Ok((out.len() - out_len, fin))
+    }
+
+    /// Whether the only thing left to send is the FIN: the final size is set,
+    /// no frame carrying it has been emitted yet (or it was lost), and every
+    /// byte has already been emitted.
+    pub fn fin_only_pending(&self) -> bool {
+        self.fin_off.is_some() &&
+            !self.fin_sent &&
+            self.fin_off == Some(self.off_front())
+    }
+
+    /// Marks the FIN as not emitted, after the frame carrying it was lost.
+    pub fn fin_lost(&mut self) {
+        self.fin_sent = false;
     }
 
     /// Updates the max_data limit to the given value.

@@ -4219,6 +4219,10 @@ impl<F: BufFactory> Connection<F> {
 
                         let empty_fin = length == 0 && fin;
 
+                        if fin {
+                            stream.send.fin_lost();
+                        }
+
                         let retransmitted =
                             stream.send.retransmit(offset, length);
 
@@ -5326,7 +5330,11 @@ impl<F: BufFactory> Connection<F> {
 
                 let priority_key = Arc::clone(&stream.priority_key);
                 // Remove the stream when it is no longer flushable.
-                if !stream.is_flushable() {
+                // A FIN with nothing else left to send is not "flushable" by
+                // `is_flushable()`, but it still has to be emitted: a
+                // retransmission of earlier data can drain the queue entry
+                // before the FIN-only frame goes out.
+                if !stream.is_flushable() && !stream.send.fin_only_pending() {
                     self.streams.remove_flushable(&priority_key);
                 } else if stream.incremental {
                     // Shuffle the incremental stream to the back of the

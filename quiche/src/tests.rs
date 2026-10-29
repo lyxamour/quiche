@@ -2978,6 +2978,97 @@ fn streams_blocked_uni_sent(
     }
 }
 
+/// Tests that a FIN written after every byte was already emitted still goes
+/// out when an earlier range has to be retransmitted first.
+///
+/// The retransmission empties the stream's send queue entry before the
+/// FIN-only frame is emitted; without a pending-FIN check the FIN is dropped
+/// and the peer never sees the end of the stream.
+#[rstest]
+fn fin_after_all_data_sent_survives_retransmission(
+    #[values("cubic", "bbr2_gcongestion")] cc_algorithm_name: &str,
+) {
+    let mut buf = [0; 65535];
+
+    let mut config = test_utils::Pipe::default_config(cc_algorithm_name).unwrap();
+    config.set_initial_max_data(1_000_000);
+    config.set_initial_max_stream_data_bidi_local(1_000_000);
+    config.set_initial_max_stream_data_bidi_remote(1_000_000);
+    let mut pipe = test_utils::Pipe::with_config(&mut config).unwrap();
+    assert_eq!(pipe.handshake(), Ok(()));
+
+    let data = vec![42u8; 8000];
+    assert_eq!(pipe.client.stream_send(0, &data, false), Ok(8000));
+
+    // The first packet is lost, the rest arrive and are ACKed, which makes
+    // the client declare the first one lost (packet threshold).
+    let mut flight = test_utils::emit_flight(&mut pipe.client).unwrap();
+    assert!(flight.len() >= 5, "need packets after the lost one");
+    flight.remove(0);
+    test_utils::process_flight(&mut pipe.server, flight).unwrap();
+    let acks = test_utils::emit_flight(&mut pipe.server).unwrap();
+    test_utils::process_flight(&mut pipe.client, acks).unwrap();
+
+    // All bytes were emitted; only now is the FIN written. The loss is
+    // handled by the next send(), after this call.
+    assert_eq!(pipe.client.stream_send(0, b"", true), Ok(0));
+
+    assert_eq!(pipe.advance(), Ok(()));
+
+    let mut total = 0;
+    let mut fin = false;
+    while let Ok((n, f)) = pipe.server.stream_recv(0, &mut buf) {
+        total += n;
+        fin |= f;
+    }
+    assert_eq!(total, 8000);
+    assert!(fin, "FIN must reach the peer after the retransmission");
+}
+
+/// Tests that a lost FIN-only frame is sent again even when an earlier lost
+/// range is retransmitted first: both are declared lost together, the
+/// retransmission drains the queue entry, and the FIN has to survive that.
+#[rstest]
+fn lost_fin_only_frame_survives_retransmission(
+    #[values("cubic", "bbr2_gcongestion")] cc_algorithm_name: &str,
+) {
+    let mut buf = [0; 65535];
+
+    let mut config = test_utils::Pipe::default_config(cc_algorithm_name).unwrap();
+    config.set_initial_max_data(1_000_000);
+    config.set_initial_max_stream_data_bidi_local(1_000_000);
+    config.set_initial_max_stream_data_bidi_remote(1_000_000);
+    let mut pipe = test_utils::Pipe::with_config(&mut config).unwrap();
+    assert_eq!(pipe.handshake(), Ok(()));
+
+    let data = vec![42u8; 8000];
+    assert_eq!(pipe.client.stream_send(0, &data, false), Ok(8000));
+
+    // The first data packet is lost; the rest arrive.
+    let mut flight = test_utils::emit_flight(&mut pipe.client).unwrap();
+    assert!(flight.len() >= 5, "need packets after the lost one");
+    flight.remove(0);
+    test_utils::process_flight(&mut pipe.server, flight).unwrap();
+
+    // The FIN goes out alone in its own packet, which is lost too.
+    assert_eq!(pipe.client.stream_send(0, b"", true), Ok(0));
+    assert!(test_utils::emit_flight(&mut pipe.client).is_ok());
+
+    // Later packets get ACKed, so both lost packets are declared lost together.
+    test_utils::trigger_ack_based_loss(&mut pipe.client, &mut pipe.server);
+
+    assert_eq!(pipe.advance(), Ok(()));
+
+    let mut total = 0;
+    let mut fin = false;
+    while let Ok((n, f)) = pipe.server.stream_recv(0, &mut buf) {
+        total += n;
+        fin |= f;
+    }
+    assert_eq!(total, 8000);
+    assert!(fin, "the lost FIN must be sent again");
+}
+
 /// Tests that a lost STREAMS_BLOCKED (bidi) frame is retransmitted.
 ///
 /// When the packet carrying the frame is declared lost via the PTO mechanism,
