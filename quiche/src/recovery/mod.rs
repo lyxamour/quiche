@@ -852,6 +852,22 @@ mod tests {
     use smallvec::smallvec;
     use std::str::FromStr;
 
+    #[test]
+    fn bbr_loss_threshold_reaches_the_recovery_config() {
+        let mut config = Config::new(crate::PROTOCOL_VERSION).unwrap();
+        assert_eq!(
+            RecoveryConfig::from_config(&config).custom_bbr_params,
+            None
+        );
+
+        config.set_bbr_loss_threshold(0.6);
+        let params = RecoveryConfig::from_config(&config)
+            .custom_bbr_params
+            .unwrap();
+        assert_eq!(params.loss_threshold, Some(0.6));
+        assert_eq!(params.startup_cwnd_gain, None);
+    }
+
     fn recovery_for_alg(algo: CongestionControlAlgorithm) -> Recovery {
         let mut cfg = Config::new(crate::PROTOCOL_VERSION).unwrap();
         cfg.set_cc_algorithm(algo);

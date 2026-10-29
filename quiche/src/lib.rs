@@ -1109,6 +1109,18 @@ impl Config {
         self.custom_bbr_params = Some(custom_bbr_settings);
     }
 
+    /// Sets the loss rate above which BBRv2 treats loss as congestion and
+    /// lowers its bandwidth and inflight estimates (default 0.015).
+    ///
+    /// Only applies to `CongestionControlAlgorithm::Bbr2Gcongestion`. Raise it
+    /// on paths with random loss that is not congestion; BBRv2 otherwise stays
+    /// far below the link rate.
+    pub fn set_bbr_loss_threshold(&mut self, threshold: f32) {
+        self.custom_bbr_params
+            .get_or_insert_with(Default::default)
+            .loss_threshold = Some(threshold);
+    }
+
     /// Sets the congestion control algorithm used by string.
     ///
     /// The default value is `cubic`. On error `Error::CongestionControl`
