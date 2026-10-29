@@ -245,6 +245,12 @@ impl Pacer {
         }
     }
 
+    pub fn use_brutal(&mut self, bytes_per_second: u64, mss: usize) {
+        self.sender = Sender::Brutal(Brutal::new(bytes_per_second, mss));
+        self.burst_tokens = 0;
+        self.pacing_limited = false;
+    }
+
     #[cfg(feature = "qlog")]
     pub fn state_str(&self) -> &'static str {
         self.sender.state_str()

@@ -42,7 +42,6 @@ use crate::recovery::MAX_PTO_PROBES_COUNT;
 use crate::recovery::PACKET_REORDER_TIME_THRESHOLD;
 
 use super::bbr2::BBRv2;
-use super::brutal::Brutal;
 use super::pacer::Sender;
 use super::pacer::Pacer;
 use super::Acked;
@@ -514,23 +513,16 @@ impl GRecovery {
     }
 
     pub fn new(recovery_config: &RecoveryConfig) -> Option<Self> {
-        let cc = if let Some(bps) = recovery_config.brutal_bytes_per_second {
-            Sender::Brutal(Brutal::new(
-                bps,
-                recovery_config.max_send_udp_payload_size,
-            ))
-        } else {
-            match recovery_config.cc_algorithm {
-                CongestionControlAlgorithm::Bbr2Gcongestion =>
-                    Sender::Bbr2(BBRv2::new(
-                        recovery_config.initial_congestion_window_packets,
-                        MAX_WINDOW_PACKETS,
-                        recovery_config.max_send_udp_payload_size,
-                        recovery_config.initial_rtt,
-                        recovery_config.custom_bbr_params.as_ref(),
-                    )),
-                _ => return None,
-            }
+        let cc = match recovery_config.cc_algorithm {
+            CongestionControlAlgorithm::Bbr2Gcongestion =>
+                Sender::Bbr2(BBRv2::new(
+                    recovery_config.initial_congestion_window_packets,
+                    MAX_WINDOW_PACKETS,
+                    recovery_config.max_send_udp_payload_size,
+                    recovery_config.initial_rtt,
+                    recovery_config.custom_bbr_params.as_ref(),
+                )),
+            _ => return None,
         };
 
         Some(Self {
@@ -1110,6 +1102,12 @@ impl RecoveryOps for GRecovery {
         self.pacer.on_app_limited(self.bytes_in_flight.get())
     }
 
+    fn use_brutal(&mut self, bytes_per_second: u64) -> bool {
+        self.pacer.use_brutal(bytes_per_second, self.max_datagram_size);
+        self.time_sent_set_to_now = false;
+        true
+    }
+
     #[cfg(test)]
     fn sent_packets_len(&self, epoch: packet::Epoch) -> usize {
         self.epochs[epoch].sent_packets.len()
@@ -1396,17 +1394,21 @@ mod tests {
     }
 
     #[test]
-    fn brutal_is_selected_only_when_configured() {
+    fn use_brutal_replaces_the_sender() {
         let mut config = Config::new(crate::PROTOCOL_VERSION).unwrap();
         config.set_cc_algorithm(CongestionControlAlgorithm::CUBIC);
         assert!(
             GRecovery::new(&RecoveryConfig::from_config(&config)).is_none()
         );
 
-        config.set_brutal_bandwidth(12_500_000);
-        let r = GRecovery::new(&RecoveryConfig::from_config(&config)).unwrap();
-        // Brutal's cwnd before the first RTT sample; BBRv2 would give
-        // initial_congestion_window_packets * mss.
+        config.set_cc_algorithm(CongestionControlAlgorithm::Bbr2Gcongestion);
+        let mut r =
+            GRecovery::new(&RecoveryConfig::from_config(&config)).unwrap();
+        // BBRv2 starts at initial_congestion_window_packets * mss.
+        assert_ne!(r.cwnd(), 10240);
+
+        assert!(r.use_brutal(12_500_000));
+        // Brutal's cwnd before the first RTT sample.
         assert_eq!(r.cwnd(), 10240);
     }
 }

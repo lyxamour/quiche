@@ -135,7 +135,6 @@ pub struct RecoveryConfig {
     pub max_ack_delay: Duration,
     pub cc_algorithm: CongestionControlAlgorithm,
     pub custom_bbr_params: Option<BbrParams>,
-    pub brutal_bytes_per_second: Option<u64>,
     pub hystart: bool,
     pub pacing: bool,
     pub max_pacing_rate: Option<u64>,
@@ -152,7 +151,6 @@ impl RecoveryConfig {
             max_ack_delay: Duration::ZERO,
             cc_algorithm: config.cc_algorithm,
             custom_bbr_params: config.custom_bbr_params,
-            brutal_bytes_per_second: config.brutal_bytes_per_second,
             hystart: config.hystart,
             pacing: config.pacing,
             max_pacing_rate: config.max_pacing_rate,
@@ -266,6 +264,10 @@ pub trait RecoveryOps {
     fn update_max_datagram_size(&mut self, new_max_datagram_size: usize);
 
     fn on_app_limited(&mut self);
+
+    /// Switches the sender to Brutal at `bytes_per_second`. Returns `false`
+    /// if this recovery implementation has no pacer to host it.
+    fn use_brutal(&mut self, bytes_per_second: u64) -> bool;
 
     // Since a recovery module is path specific, this tracks the largest packet
     // sent per path.
