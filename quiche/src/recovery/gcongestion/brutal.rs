@@ -20,6 +20,13 @@ const SLOT_COUNT: usize = 5;
 const MIN_SAMPLE_COUNT: u64 = 50;
 const MIN_ACK_RATE: f64 = 0.8;
 const CWND_MULTIPLIER: f64 = 2.0;
+/// Floor on the RTT the cwnd is sized from. Hysteria has none, but its sender
+/// reacts to ACKs within microseconds. A sender with coarser ACK handling and
+/// timers, whose RTT samples also exclude the peer's ACK delay, is otherwise
+/// cwnd-bound far below the target rate on sub-millisecond paths (measured:
+/// 55 -> 72 Mbit/s at 100 Mbit/s target, 5% loss, loopback-like RTT). It has no
+/// effect once 2 * srtt exceeds it.
+const MIN_CWND_RTT: Duration = Duration::from_millis(2);
 /// cwnd used until the first RTT sample (Hysteria: 10240).
 const INITIAL_CWND: usize = 10240;
 
@@ -87,7 +94,7 @@ impl CongestionControl for Brutal {
         match self.srtt {
             None => INITIAL_CWND,
             Some(rtt) => ((self.bytes_per_second as f64
-                * rtt.as_secs_f64()
+                * rtt.max(MIN_CWND_RTT).as_secs_f64()
                 * CWND_MULTIPLIER
                 / self.ack_rate) as usize)
                 .max(self.mss),
@@ -260,6 +267,14 @@ mod tests {
         assert_eq!(b.ack_rate_factor(), 0.8);
         event(&mut b, t0 + Duration::from_secs(7), 100, 0, &r);
         assert_eq!(b.ack_rate_factor(), 1.0);
+    }
+
+    #[test]
+    fn cwnd_rtt_is_floored() {
+        let mut b = Brutal::new(BPS, MSS);
+        event(&mut b, Instant::now(), 100, 0, &rtt(0)); // sub-ms path
+        // 12.5 MB/s * 2 ms * 2
+        assert_eq!(b.get_congestion_window(), 50_000);
     }
 
     #[test]
