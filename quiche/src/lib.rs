@@ -572,6 +572,7 @@ pub struct Config {
 
     cc_algorithm: CongestionControlAlgorithm,
     custom_bbr_params: Option<BbrParams>,
+    brutal_bytes_per_second: Option<u64>,
     initial_congestion_window_packets: usize,
     enable_relaxed_loss_threshold: bool,
     enable_cubic_idle_restart_fix: bool,
@@ -653,6 +654,7 @@ impl Config {
             grease: true,
             cc_algorithm: CongestionControlAlgorithm::CUBIC,
             custom_bbr_params: None,
+            brutal_bytes_per_second: None,
             initial_congestion_window_packets:
                 DEFAULT_INITIAL_CONGESTION_WINDOW_PACKETS,
             enable_relaxed_loss_threshold: false,
@@ -1107,6 +1109,19 @@ impl Config {
     #[doc(hidden)]
     pub fn set_custom_bbr_params(&mut self, custom_bbr_settings: BbrParams) {
         self.custom_bbr_params = Some(custom_bbr_settings);
+    }
+
+    /// Uses the Brutal congestion control (Hysteria 2) with a fixed target
+    /// send rate in bytes per second, overriding the algorithm selected by
+    /// `set_cc_algorithm()`.
+    ///
+    /// Brutal does not back off on loss: it paces at the target rate divided by
+    /// the observed ACK rate (floored at 0.8), so pacing must stay enabled and
+    /// the application must honor `SendInfo::at`.
+    ///
+    /// The default is `None` (the selected algorithm is used).
+    pub fn set_brutal_bandwidth(&mut self, bytes_per_second: u64) {
+        self.brutal_bytes_per_second = Some(bytes_per_second);
     }
 
     /// Sets the congestion control algorithm used by string.
