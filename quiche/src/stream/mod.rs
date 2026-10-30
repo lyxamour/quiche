@@ -865,9 +865,16 @@ impl<F: BufFactory> Stream<F> {
     }
 
     /// Returns true if the stream has data to send and is allowed to send at
-    /// least some of it.
+    /// least some of it, or if only its final size remains to be sent.
     pub fn is_flushable(&self) -> bool {
         let off_front = self.send.off_front();
+
+        // A pending FIN can be sent on its own only once there is no data left
+        // to send before the final offset, e.g. when retransmitted data ends
+        // before an already acknowledged tail.
+        if self.send.is_fin_pending() && off_front == self.send.off_back() {
+            return true;
+        }
 
         !self.send.is_empty() &&
             off_front < self.send.off_back() &&
@@ -1750,6 +1757,9 @@ mod tests {
         assert!(!stream.send.is_complete());
 
         stream.send.ack(0, 1);
+        assert!(!stream.send.is_complete());
+
+        stream.send.ack_fin();
         assert!(stream.send.is_complete());
 
         assert!(!stream.is_complete());

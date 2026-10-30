@@ -122,9 +122,13 @@ where
     /// The final stream offset written to the stream, if any.
     fin_off: Option<u64>,
 
-    /// Whether a STREAM frame carrying the final size has been emitted and
-    /// not reported lost since.
-    fin_sent: bool,
+    /// Whether a STREAM frame carrying FIN has been acknowledged.
+    fin_acked: bool,
+
+    /// Whether the final size still needs to be sent in a STREAM frame
+    /// carrying FIN, because no such frame has been sent yet or the last one
+    /// was lost.
+    fin_pending: bool,
 
     /// Whether the stream's send-side has been shut down.
     shutdown: bool,
@@ -170,8 +174,9 @@ impl<F: BufFactory> SendBuf<F> {
             }
         }
 
-        if fin {
+        if fin && self.fin_off.is_none() {
             self.fin_off = Some(max_off);
+            self.fin_pending = true;
         }
 
         // Don't queue data that was already fully acked.
@@ -302,7 +307,7 @@ impl<F: BufFactory> SendBuf<F> {
         let fin = self.fin_off == Some(next_off);
 
         if fin {
-            self.fin_sent = true;
+            self.fin_pending = false;
         }
 
         // Record the largest offset that has been sent so we can accurately
@@ -310,20 +315,6 @@ impl<F: BufFactory> SendBuf<F> {
         self.emit_off = cmp::max(self.emit_off, next_off);
 
         Ok((out.len() - out_len, fin))
-    }
-
-    /// Whether the only thing left to send is the FIN: the final size is set,
-    /// no frame carrying it has been emitted yet (or it was lost), and every
-    /// byte has already been emitted.
-    pub fn fin_only_pending(&self) -> bool {
-        self.fin_off.is_some() &&
-            !self.fin_sent &&
-            self.fin_off == Some(self.off_front())
-    }
-
-    /// Marks the FIN as not emitted, after the frame carrying it was lost.
-    pub fn fin_lost(&mut self) {
-        self.fin_sent = false;
     }
 
     /// Updates the max_data limit to the given value.
@@ -344,6 +335,12 @@ impl<F: BufFactory> SendBuf<F> {
     /// Increments the acked data offset.
     pub fn ack(&mut self, off: u64, len: usize) {
         self.acked.insert(off..off + len as u64);
+    }
+
+    /// Marks the stream's final size as acknowledged by the peer.
+    pub(crate) fn ack_fin(&mut self) {
+        self.fin_acked = true;
+        self.fin_pending = false;
     }
 
     pub fn ack_and_drop(&mut self, off: u64, len: usize) -> usize {
@@ -456,12 +453,28 @@ impl<F: BufFactory> SendBuf<F> {
         total_retransmitted as usize
     }
 
+    /// Marks the final size for retransmission after a STREAM frame carrying
+    /// FIN was lost.
+    ///
+    /// This is needed even when the frame's data was acknowledged in another
+    /// packet, as the FIN still has to reach the peer.
+    pub(crate) fn retransmit_fin(&mut self) {
+        if self.fin_acked || self.shutdown || self.error.is_some() {
+            return;
+        }
+
+        self.fin_pending = self.fin_off.is_some();
+    }
+
     /// Resets the stream at the current offset and clears all buffered data.
     pub fn reset(&mut self) -> (u64, u64) {
         let unsent_off = cmp::max(self.off_front(), self.emit_off);
         let unsent_len = self.off_back().saturating_sub(unsent_off);
 
         self.fin_off = Some(unsent_off);
+
+        // The final size is sent in RESET_STREAM instead.
+        self.fin_pending = false;
 
         // Drop all buffered data.
         self.data.clear();
@@ -548,13 +561,20 @@ impl<F: BufFactory> SendBuf<F> {
         false
     }
 
+    /// Returns true if the final size still needs to be sent to the peer.
+    pub fn is_fin_pending(&self) -> bool {
+        self.fin_pending
+    }
+
     /// Returns true if the send-side of the stream is complete.
     ///
-    /// This happens when the stream's send final size is known, and the peer
-    /// has already acked all stream data up to that point.
+    /// This happens when the peer has acknowledged the stream's final size and
+    /// all stream data up to that point, or the stream has been reset.
     pub fn is_complete(&self) -> bool {
         if let Some(fin_off) = self.fin_off {
-            if self.acked == (0..fin_off) {
+            if (self.fin_acked || self.shutdown || self.error.is_some()) &&
+                self.acked == (0..fin_off)
+            {
                 return true;
             }
         }
@@ -617,6 +637,64 @@ impl<F: BufFactory> SendBuf<F> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn send_buf_fin_pending() {
+        let mut buf = [0; 10];
+
+        let mut send = <SendBuf>::new(u64::MAX);
+
+        assert_eq!(send.write(b"hello", false), Ok(5));
+        assert!(!send.is_fin_pending());
+
+        assert_eq!(send.emit(&mut buf), Ok((5, false)));
+
+        // The final size became known after all data was sent.
+        assert_eq!(send.write(b"", true), Ok(0));
+        assert!(send.is_fin_pending());
+
+        assert_eq!(send.emit(&mut buf), Ok((0, true)));
+        assert!(!send.is_fin_pending());
+
+        // Writing the FIN again doesn't schedule another one.
+        assert_eq!(send.write(b"", true), Ok(0));
+        assert!(!send.is_fin_pending());
+
+        // A lost FIN needs to be resent even if its data was acked.
+        send.ack_and_drop(0, 5);
+        send.retransmit(0, 5);
+        send.retransmit_fin();
+        assert!(send.is_fin_pending());
+
+        send.ack_fin();
+        assert!(!send.is_fin_pending());
+
+        send.retransmit_fin();
+        assert!(!send.is_fin_pending());
+    }
+
+    #[test]
+    fn send_buf_fin_not_pending_after_shutdown_or_stop() {
+        let mut send = <SendBuf>::new(u64::MAX);
+
+        assert_eq!(send.write(b"hello", true), Ok(5));
+        assert!(send.is_fin_pending());
+
+        assert!(send.shutdown().is_ok());
+        assert!(!send.is_fin_pending());
+
+        send.retransmit_fin();
+        assert!(!send.is_fin_pending());
+
+        let mut send = <SendBuf>::new(u64::MAX);
+
+        assert_eq!(send.write(b"hello", true), Ok(5));
+        assert!(send.stop(0).is_ok());
+        assert!(!send.is_fin_pending());
+
+        send.retransmit_fin();
+        assert!(!send.is_fin_pending());
+    }
 
     #[test]
     fn empty_write() {
